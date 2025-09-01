@@ -52,19 +52,22 @@ RESTART_SVC="/etc/systemd/system/shadowsocks-rust-restart.service"
 RESTART_TIMER="/etc/systemd/system/shadowsocks-rust-restart.timer"
 
 # ========== 插件检测 ==========
-detect_obfs_plugin(){
+detect_plugin_mode(){
   if [ -f /etc/debian_version ]; then
     VER=$(grep -oE '^[0-9]+' /etc/debian_version | head -n1)
     if [ "$VER" -ge 13 ]; then
       PLUGIN="v2ray-plugin"
-      PLUGIN_OPTS="server;mode=ws;host=bing.com"
+      PLUGIN_OPTS="server;ws;host=bing.com"
+      MODE="ws"
     else
       PLUGIN="obfs-server"
       PLUGIN_OPTS="obfs=http"
+      MODE="obfs"
     fi
   else
     PLUGIN="obfs-server"
     PLUGIN_OPTS="obfs=http"
+    MODE="obfs"
   fi
 }
 
@@ -72,9 +75,9 @@ detect_obfs_plugin(){
 do_install(){
   need_root
   detect_pm
-  detect_obfs_plugin
+  detect_plugin_mode
 
-  echo "== Shadowsocks-2022 (rust) 安装器：${PLUGIN} =="
+  echo "== Shadowsocks-2022 (rust) 安装器：模式 ${MODE} =="
 
   DEFAULT_PORT=45454
   read -rp "端口 [默认 ${DEFAULT_PORT}]: " PORT
@@ -118,7 +121,7 @@ do_install(){
     [ "$PLUGIN" = "obfs-server" ] && pm_install simple-obfs || true
   fi
 
-  # ---- 安装 Shadowsocks-Rust ----
+  # ---- 安装 ssserver ----
   install -d /usr/local/bin
   cd /usr/local/bin
   URL="$(ssrust_url_by_arch)"
@@ -178,32 +181,21 @@ RandomizedDelaySec=120
 WantedBy=timers.target
 EOF
 
-  # ---- 防火墙 ----
-  if has ufw; then ufw allow "${PORT}"/tcp || true; fi
-  if has firewall-cmd; then firewall-cmd --permanent --add-port="${PORT}"/tcp && firewall-cmd --reload || true; fi
-  if has iptables; then iptables -C INPUT -p tcp --dport "${PORT}" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "${PORT}" -j ACCEPT; fi
-
   # ---- 启动 ----
   systemctl daemon-reload
   systemctl enable --now shadowsocks-rust
   systemctl enable --now shadowsocks-rust-restart.timer
 
-  sleep 1
-  if ! systemctl is-active --quiet shadowsocks-rust; then
-    echo "❌ 服务启动失败，日志："
-    journalctl -u shadowsocks-rust -n 50 --no-pager
-    exit 1
-  fi
-
   # ---- 输出节点 ----
   IP="$(pubip)"
   ENC="$(printf "%s:%s" "$METHOD" "$PASSWORD" | b64_inline)"
 
-  if [ "$PLUGIN" = "v2ray-plugin" ]; then
-    SS_URL="ss://${ENC}@${IP}:${PORT}?plugin=v2ray-plugin%3Bmode%3Dws%3Bhost%3Dbing.com#SS2022-V2P-WS"
+  if [ "$MODE" = "ws" ]; then
+    SS_PLUGIN="ss://${ENC}@${IP}:${PORT}?plugin=v2ray-plugin%3Bws%3Bhost%3Dbing.com#SS2022-WS"
   else
-    SS_URL="ss://${ENC}@${IP}:${PORT}?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dbing.com#SS2022-OBFS"
+    SS_PLUGIN="ss://${ENC}@${IP}:${PORT}?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dbing.com#SS2022-OBFS"
   fi
+  SS_RAW="ss://${ENC}@${IP}:${PORT}#SS2022-RAW"
 
   echo
   echo "========================================"
@@ -211,10 +203,12 @@ EOF
   echo "服务器: ${IP}"
   echo "端口  : ${PORT}"
   echo "加密  : ${METHOD}"
-  echo "插件  : ${PLUGIN}"
   echo "========================================"
-  echo "节点链接："
-  echo "$SS_URL"
+  echo "带插件节点："
+  echo "$SS_PLUGIN"
+  echo
+  echo "不带插件节点："
+  echo "$SS_RAW"
   echo "========================================"
 }
 
@@ -222,7 +216,7 @@ EOF
 do_uninstall(){
   need_root
   detect_pm
-  detect_obfs_plugin
+  detect_plugin_mode
 
   echo "== 卸载 Shadowsocks-Rust =="
 
