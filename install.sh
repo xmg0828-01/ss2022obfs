@@ -45,7 +45,7 @@ b64_inline(){
   fi
 }
 
-# ========== 路径/文件 ==========
+# ========== 路径 ==========
 CONF="/etc/shadowsocks.json"
 SERVICE="/etc/systemd/system/shadowsocks-rust.service"
 RESTART_SVC="/etc/systemd/system/shadowsocks-rust-restart.service"
