@@ -57,7 +57,7 @@ detect_obfs_plugin(){
     VER=$(grep -oE '^[0-9]+' /etc/debian_version | head -n1)
     if [ "$VER" -ge 13 ]; then
       PLUGIN="v2ray-plugin"
-      PLUGIN_OPTS="server;tls;host=bing.com"
+      PLUGIN_OPTS="server;mode=ws;host=bing.com"
     else
       PLUGIN="obfs-server"
       PLUGIN_OPTS="obfs=http"
@@ -200,7 +200,7 @@ EOF
   ENC="$(printf "%s:%s" "$METHOD" "$PASSWORD" | b64_inline)"
 
   if [ "$PLUGIN" = "v2ray-plugin" ]; then
-    SS_URL="ss://${ENC}@${IP}:${PORT}?plugin=v2ray-plugin%3Btls%3Bhost%3Dbing.com#SS2022-V2P"
+    SS_URL="ss://${ENC}@${IP}:${PORT}?plugin=v2ray-plugin%3Bmode%3Dws%3Bhost%3Dbing.com#SS2022-V2P-WS"
   else
     SS_URL="ss://${ENC}@${IP}:${PORT}?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dbing.com#SS2022-OBFS"
   fi
