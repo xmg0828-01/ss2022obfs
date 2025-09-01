@@ -38,7 +38,6 @@ ssrust_url_by_arch(){
 }
 
 b64_inline(){
-  # 兼容不同 base64 实现
   if base64 --help 2>&1 | grep -q -- "-w"; then
     base64 -w0
   else
@@ -46,20 +45,37 @@ b64_inline(){
   fi
 }
 
-# ========== 路径/文件名 ==========
+# ========== 路径/文件 ==========
 CONF="/etc/shadowsocks.json"
 SERVICE="/etc/systemd/system/shadowsocks-rust.service"
 RESTART_SVC="/etc/systemd/system/shadowsocks-rust-restart.service"
 RESTART_TIMER="/etc/systemd/system/shadowsocks-rust-restart.timer"
 
-# ========== 安装流程 ==========
+# ========== 插件检测 ==========
+detect_obfs_plugin(){
+  if [ -f /etc/debian_version ]; then
+    VER=$(grep -oE '^[0-9]+' /etc/debian_version | head -n1)
+    if [ "$VER" -ge 13 ]; then
+      PLUGIN="v2ray-plugin"
+      PLUGIN_OPTS="server;tls;host=bing.com"
+    else
+      PLUGIN="obfs-server"
+      PLUGIN_OPTS="obfs=http"
+    fi
+  else
+    PLUGIN="obfs-server"
+    PLUGIN_OPTS="obfs=http"
+  fi
+}
+
+# ========== 安装 ==========
 do_install(){
   need_root
   detect_pm
+  detect_obfs_plugin
 
-  echo "== Shadowsocks-2022 (rust) 安装器：OBFS(http) + 每日重启 =="
+  echo "== Shadowsocks-2022 (rust) 安装器：${PLUGIN} =="
 
-  # ---- 交互：端口/密码（可回车用默认） ----
   DEFAULT_PORT=45454
   read -rp "端口 [默认 ${DEFAULT_PORT}]: " PORT
   PORT=${PORT:-$DEFAULT_PORT}
@@ -73,22 +89,36 @@ do_install(){
 
   echo
   echo "=== 配置确认 ==="
-  echo "监听地址: ${LISTEN}"
-  echo "端口     : ${PORT}"
-  echo "加密     : ${METHOD}"
-  echo "插件     : obfs=http"
-  echo "密码     : ${PASSWORD}"
+  echo "监听: ${LISTEN}"
+  echo "端口: ${PORT}"
+  echo "加密: ${METHOD}"
+  echo "插件: ${PLUGIN}"
+  echo "参数: ${PLUGIN_OPTS}"
+  echo "密码: ${PASSWORD}"
   read -rp "确认安装？[Y/n]: " OK; OK=${OK:-Y}
   [[ "$OK" =~ ^[Yy]$ ]] || { echo "已取消"; exit 0; }
 
   # ---- 依赖 ----
   if [ "$PM" = "apt" ]; then
-    pm_install curl wget xz-utils simple-obfs
+    pm_install curl wget xz-utils
+    if [ "$PLUGIN" = "obfs-server" ]; then
+      pm_install simple-obfs
+    else
+      URL=$(curl -fsSL https://api.github.com/repos/shadowsocks/v2ray-plugin/releases/latest \
+        | grep -oE "https://[^\"']*v2ray-plugin-linux-amd64[^\"']*tar.gz" | head -n1)
+      cd /usr/local/bin
+      curl -L "$URL" -o v2p.tgz
+      tar -xzf v2p.tgz
+      mv v2ray-plugin_* v2ray-plugin
+      chmod +x v2ray-plugin
+      rm -f v2p.tgz
+    fi
   else
-    pm_install curl wget xz simple-obfs || true
+    pm_install curl wget xz
+    [ "$PLUGIN" = "obfs-server" ] && pm_install simple-obfs || true
   fi
 
-  # ---- 安装 ssserver (rust) ----
+  # ---- 安装 Shadowsocks-Rust ----
   install -d /usr/local/bin
   cd /usr/local/bin
   URL="$(ssrust_url_by_arch)"
@@ -105,8 +135,8 @@ do_install(){
   "server_port": ${PORT},
   "password": "${PASSWORD}",
   "method": "${METHOD}",
-  "plugin": "obfs-server",
-  "plugin_opts": "obfs=http"
+  "plugin": "${PLUGIN}",
+  "plugin_opts": "${PLUGIN_OPTS}"
 }
 EOF
 
@@ -125,7 +155,7 @@ LimitNOFILE=4096
 WantedBy=multi-user.target
 EOF
 
-  # ---- 每日重启 timer（04:00）----
+  # ---- 定时重启 ----
   cat >"$RESTART_SVC" <<'EOF'
 [Unit]
 Description=Restart shadowsocks-rust service (daily)
@@ -148,12 +178,12 @@ RandomizedDelaySec=120
 WantedBy=timers.target
 EOF
 
-  # ---- 防火墙放行（尽力而为）----
+  # ---- 防火墙 ----
   if has ufw; then ufw allow "${PORT}"/tcp || true; fi
   if has firewall-cmd; then firewall-cmd --permanent --add-port="${PORT}"/tcp && firewall-cmd --reload || true; fi
   if has iptables; then iptables -C INPUT -p tcp --dport "${PORT}" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "${PORT}" -j ACCEPT; fi
 
-  # ---- 启动 & 自启 ----
+  # ---- 启动 ----
   systemctl daemon-reload
   systemctl enable --now shadowsocks-rust
   systemctl enable --now shadowsocks-rust-restart.timer
@@ -168,8 +198,12 @@ EOF
   # ---- 输出节点 ----
   IP="$(pubip)"
   ENC="$(printf "%s:%s" "$METHOD" "$PASSWORD" | b64_inline)"
-  SS_OBFS="ss://${ENC}@${IP}:${PORT}?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dwww.bing.com#SS2022-OBFS"
-  SS_RAW="ss://${ENC}@${IP}:${PORT}#SS2022-RAW"
+
+  if [ "$PLUGIN" = "v2ray-plugin" ]; then
+    SS_URL="ss://${ENC}@${IP}:${PORT}?plugin=v2ray-plugin%3Btls%3Bhost%3Dbing.com#SS2022-V2P"
+  else
+    SS_URL="ss://${ENC}@${IP}:${PORT}?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dbing.com#SS2022-OBFS"
+  fi
 
   echo
   echo "========================================"
@@ -177,13 +211,10 @@ EOF
   echo "服务器: ${IP}"
   echo "端口  : ${PORT}"
   echo "加密  : ${METHOD}"
-  echo "插件  : obfs=http"
+  echo "插件  : ${PLUGIN}"
   echo "========================================"
-  echo "带 obfs 节点："
-  echo "$SS_OBFS"
-  echo
-  echo "不带 obfs（排障用）："
-  echo "$SS_RAW"
+  echo "节点链接："
+  echo "$SS_URL"
   echo "========================================"
 }
 
@@ -191,8 +222,9 @@ EOF
 do_uninstall(){
   need_root
   detect_pm
+  detect_obfs_plugin
 
-  echo "== 卸载 shadowsocks-rust + 定时器 =="
+  echo "== 卸载 Shadowsocks-Rust =="
 
   systemctl disable --now shadowsocks-rust 2>/dev/null || true
   systemctl disable --now shadowsocks-rust-restart.timer 2>/dev/null || true
@@ -200,17 +232,18 @@ do_uninstall(){
   rm -f "$SERVICE" "$RESTART_SVC" "$RESTART_TIMER" "$CONF"
   systemctl daemon-reload
 
-  # 可选：删除 ssserver 二进制
   rm -f /usr/local/bin/ssserver
+  [ "$PLUGIN" = "v2ray-plugin" ] && rm -f /usr/local/bin/v2ray-plugin
 
-  # 可选：卸载 simple-obfs（如果你不再需要）
-  read -rp "是否卸载 simple-obfs 插件包？[y/N]: " DEL
-  if [[ "${DEL:-N}" =~ ^[Yy]$ ]]; then
-    if [ "$PM" = "apt" ]; then
-      apt purge -y simple-obfs || true
-      apt autoremove -y || true
-    else
-      yum remove -y simple-obfs || true
+  if [ "$PLUGIN" = "obfs-server" ]; then
+    read -rp "是否卸载 simple-obfs 包？[y/N]: " DEL
+    if [[ "${DEL:-N}" =~ ^[Yy]$ ]]; then
+      if [ "$PM" = "apt" ]; then
+        apt purge -y simple-obfs || true
+        apt autoremove -y || true
+      else
+        yum remove -y simple-obfs || true
+      fi
     fi
   fi
 
